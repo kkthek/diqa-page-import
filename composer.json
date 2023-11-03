@@ -30,7 +30,7 @@
   },
   "autoload": {
     "psr-4": {
-      "DIQA\\PageImport\\": [
+      "DIQA\\": [
         "src/", "test/"]
     }
   },

@@ -1,8 +1,6 @@
 {
   "name": "PageImport",
-  "author": [
-    "[https://www.diqa.de DIQA]"
-  ],
+  "author": [ "[https://www.diqa.de DIQA-Projektmanagement GmbH]" ],
   "url": "https://github.com/kkthek/diqa-page-import",
   "descriptionmsg": "page-import-desc",
   "license-name": "GPL-2.0-or-later",

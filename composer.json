@@ -2,7 +2,6 @@
   "name": "diqa/page-import",
   "type": "mediawiki-extension",
   "description": "Maintenance tool to import/export wiki pages and images",
-  "type": "library",
   "keywords": [
     "import",
     "export",

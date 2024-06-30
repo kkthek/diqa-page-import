@@ -1,4 +1,4 @@
-# PageImport 1.0
+# PageImport 1.1
 Extension for importing / exporting wikipages and images.
 
 # Requirements
@@ -11,3 +11,9 @@ The functionality is accessible via the 2 maintenance scripts
 * WikiImport
 
 (c) 2024 DIQA-Projektmanagement GmbH
+
+CHANGES
+
+1.1
+
+* Support to import images. 

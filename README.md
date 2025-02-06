@@ -10,7 +10,7 @@ The functionality is accessible via the 2 maintenance scripts
 * WikiExport
 * WikiImport
 
-(c) 2024 DIQA-Projektmanagement GmbH
+(c) 2025 DIQA-Projektmanagement GmbH
 
 CHANGES
 

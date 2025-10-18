@@ -248,7 +248,8 @@ class WikiImport extends Maintenance {
      */
     private function getAllPages($nsID) {
         $pageNames = array ();
-        $DbConnection = wfGetDB ( DB_REPLICA );
+        $services = MediaWikiServices::getInstance();
+        $DbConnection = $services->getConnectionProvider()->getReplicaDatabase();
 
         $results = $DbConnection->select (
             array ('page'),

@@ -1,19 +1,4 @@
 <?php
-// Usage:
-//
-//     php WikiImport.php [OPTIONS]
-//
-// Options:
-//     --namespace=NAMESPACE
-//         Select a list of namesapace (comma-separated).
-//         If no namespace is selected, all namespaces are selected.
-//
-//     --directory=DIRECTORY
-//         Select the directory containing the folders for each namespace.
-//         If no directory is selected, the current directory is used.
-//
-// Note: Convert line endings of text files to unix line endings.
-
 
 use DIQA\Formatter\Color;
 use DIQA\Formatter\Config;
@@ -22,77 +7,88 @@ use DIQA\PageImport\EditWikiPage;
 use DIQA\PageImport\LoggerUtils;
 use MediaWiki\MediaWikiServices;
 use MediaWiki\Revision\SlotRecord;
+use MediaWiki\Maintenance\Maintenance;
+use MediaWiki\Title\Title;
 
 error_reporting(E_ERROR);
 
+// @codeCoverageIgnoreStart
 require_once __DIR__ . '/../../../maintenance/Maintenance.php';
+// @codeCoverageIgnoreEnd
 
-class WikiImport extends Maintenance {
 
-    const SKIPPED  = "[ skipped  ]";
-    const UPDATED  = "[ updated  ]";
-    const CREATED  = "[ created  ]";
-    const CONFLICT = "[ conflict ]";
-    const ERROR    = "[  error   ]";
-    const ONLY_LF  = "[ only LF  ]"; // differ only in line feeds, actually means "skipped"
+class WikiImport extends Maintenance
+{
+
+    const string SKIPPED = "[ skipped  ]";
+    const string UPDATED = "[ updated  ]";
+    const string UPLOADED = "[ uploaded ]";
+    const string CREATED = "[ created  ]";
+    const string CONFLICT = "[ conflict ]";
+    const string ERROR = "[  error   ]";
+    const string ONLY_LF = "[ only LF  ]"; // differ only in line feeds, actually means "skipped"
 
     /// File extension of wiki files
-    const FILE_EXTENSION = 'wiki';
+    const string FILE_EXTENSION = 'wiki';
 
     /// Subject for creating or updating pages
-    const SUBJECT = 'Added to the wiki via WikiImport-Script.';
+    const string SUBJECT = 'Added to the wiki via WikiImport-Script.';
 
     /// Array of namespaces that should be imported
-    private $selectedNamespaces = null;
+    private ?array $selectedNamespaces = null;
 
     /// Array of all namespaces in the Wiki
-    private $allNamespaces = null;
+    private array $allNamespaces;
 
     /// Storage directory.
-    private $storageDirectory = null;
+    private string $storageDirectory;
 
     /// Contains all pages which were not written because last revision was not auto-generated
-    private $skipDueToConflict = [];
+    private array $skipDueToConflict = [];
+    private array $updatedOrCreated = [];
+    private array $uploadedFiles = [];
 
-    private $formatter;
-    private $logger;
+    private Formatter $formatter;
+    private LoggerUtils $logger;
     private FileRepo $fileRepo;
 
-    public function __construct() {
+    private int $count;
+
+    public function __construct()
+    {
         parent::__construct();
 
-        $this->addDescription( 'Script for importing wiki pages to readable individual files.' );
-        $this->addOption( 'directory', 'files will be exported to subfolder of this directory', false, true );
-        $this->addOption( 'namespace', 'Only show/count jobs of a given type', false, true );
-        $this->addOption( 'verbose', 'Show more details in the log output', false, false, 'v' );
-        $this->addOption( 'force', 'Force import even if last revision is not auto-generated', false, false, 'f' );
+        $this->addDescription('Script for importing wiki pages to readable individual files.');
+        $this->addOption('directory', 'files will be imported from subfolders (=namespaces) of this directory', false, true);
+        $this->addOption('namespace', 'Only import the given namespaces (comma-separated names)', false, true);
+        $this->addOption('verbose', 'Show more details in the log output', false, false, 'v');
+        $this->addOption('force', 'Force import even if last revision is not auto-generated', false, false, 'f');
+        $this->addOption('uploadFiles', 'Upload files (non *.wiki pages in Files folder)', false, false, 'u');
     }
 
-    public function execute() {
+    public function execute(): void
+    {
 
         $this->logger = new LoggerUtils('WikiImporter', 'PageImport', "OFF", false);
         $this->fileRepo = MediaWikiServices::getInstance()->getRepoGroup()->getLocalRepo();
         $this->initFormatter();
 
-        // Get all namespaces.
-        $this->allNamespaces = $this->getNamespaces();
+        $this->allNamespaces = $this->getAllNamespaces();
         $this->processOptions();
         $this->doWikiImport();
     }
 
-    /**
-     * parse the commandline options amd populate $this->selectedNamespaces and $this->storageDirectory
-     * @return void
-     */
-    private function processOptions() {
-        $namespaces = $this->getOption( 'namespace', null);
-        if($namespaces!= null) {
+
+    private function processOptions(): void
+    {
+        $namespaces = $this->getOption('namespace', null);
+        if ($namespaces != null) {
             $this->selectedNamespaces = explode(',', $namespaces);
         } else {
             $this->selectedNamespaces = null;
         }
 
-        $directory = $this->getOption( 'directory', null);
+        $directory = $this->getOption('directory', null);
         if ($directory != null) {
             $this->storageDirectory = $directory;
         } else {
@@ -100,75 +96,97 @@ class WikiImport extends Maintenance {
         }
     }
 
-    /**
-     * The main method.
-     * @return void
-     */
-    private function doWikiImport() {
-        $relevantNamespaces = $this->getRelevantNamespaces ( $this->selectedNamespaces, $this->allNamespaces );
-
+    private function doWikiImport(): void
+    {
+        $relevantNamespaces = $this->getRelevantNamespaces($this->selectedNamespaces, $this->allNamespaces);
         $this->printLine("\nImporting files...");
 
-        foreach ( $relevantNamespaces as $nsID => $nsName ) {
+        foreach ($relevantNamespaces as $nsID => $nsName) {
             $this->printLine("\n$nsName");
 
-            $this->importNamespace ( $nsID, $nsName );
-            $this->checkMissingPages ( $nsID, $nsName );
+            $this->importNamespace($nsID, $nsName);
+            if ($this->hasOption('verbose')) {
+                $this->checkMissingPages($nsID, $nsName);
+            }
         }
-        $this->printLine("\n");
 
-        if (count($this->skipDueToConflict) > 0) {
-            $this->printLine("Following pages were skipped due to conflicts:\n");
-            foreach($this->skipDueToConflict as $p) {
+        if (count($this->updatedOrCreated) > 0) {
+            $this->printLine("\n");
+            $this->printLine("Following pages were created/updated:\n");
+            foreach ($this->updatedOrCreated as $p) {
                 $this->printLine(" - {$p->getPrefixedText()}");
             }
+        }
+
+        if (count($this->uploadedFiles) > 0) {
             $this->printLine("\n");
-        }
-    }
-
-    /**
-     * import the files for this single namespace.
-     * @param int    $nsId   ID of the namespace
-     * @param string $nsName string representation of the namespace
-     * @return void
-     */
-    private function importNamespace( $nsID, $nsName ) {
-        $count = 0;
-        $namespaceDir = $this->storageDirectory . '/' . $nsName;
-        if (is_dir ( $namespaceDir )) {
-            $allFiles = scandir($namespaceDir);
-            foreach ($allFiles as $file) {
-                if (is_dir("$namespaceDir/$file")) {
-                    continue;
-                }
-
-                $fileExtension = pathinfo($file, PATHINFO_EXTENSION);
-                if ($fileExtension == self::FILE_EXTENSION) {
-                    $imported = $this->importFile($nsID, $nsName, "$namespaceDir/$file");
-                    if ($imported) {
-                        $count++;
-                    }
-                }
+            $this->printLine("Following files were uploaded:\n");
+            foreach ($this->uploadedFiles as $p) {
+                $this->printLine(" - {$p}");
             }
-            $this->printLine("\t$count file(s) imported.\n");
-        } else {
-            $this->printLine("\tno files.\n");
         }
+
+        if (count($this->skipDueToConflict) > 0) {
+            $this->printLine("\n");
+            $this->printLine("Following pages were skipped due to conflicts:\n");
+            foreach ($this->skipDueToConflict as $p) {
+                $this->printLine(" - {$p->getPrefixedText()}");
+            }
+        }
+
+        $this->printLine("\n");
     }
 
-    /**
-     * import a single file.
-     * @param int    $nsID   ID of the namespace
-     * @param string $nsName string representation of the namespace
-     * @param string $file   filename including path of the file to import
-     * @return bool
-     */
-    private function importFile($nsID, $nsName, $file) {
-        $encodedFileName = pathinfo($file, PATHINFO_FILENAME);
+    private function importNamespace(int $nsID, string $nsName): void
+    {
+        $this->count = 0;
+        $namespaceDir = $this->storageDirectory . '/' . $nsName;
+
+        if (!is_dir($namespaceDir)) {
+            $this->printLine("\tno files.\n");
+            return;
+        }
+
+        $allFiles = scandir($namespaceDir);
+        foreach ($allFiles as $file) {
+            if (is_dir("$namespaceDir/$file")) {
+                continue;
+            }
+
+            $fileExtension = pathinfo($file, PATHINFO_EXTENSION);
+
+            if ($nsID === NS_FILE) {
+
+                if ($fileExtension == self::FILE_EXTENSION) {
+                    $this->importWikiPage($nsID, $nsName, "$namespaceDir/$file");
+
+                } else if ($this->hasOption('uploadFiles')) {
+                    global $wgFileExtensions;
+                    if (in_array($fileExtension, $wgFileExtensions)) {
+                        $this->uploadFile("$namespaceDir/$file", $file);
+                    } else {
+                        $this->printLine($this->formatter->formatLine("file type not supported: $fileExtension", self::SKIPPED));
+                    }
+
+                }
+
+            } else if ($fileExtension == self::FILE_EXTENSION) {
+                $this->importWikiPage($nsID, $nsName, "$namespaceDir/$file");
+            }
+
+        }
+        $this->printLine("\t{$this->count} file(s) imported.\n");
+
+    }
+
+
+    private function importWikiPage(int $nsID, string $nsName, $filePath): void
+    {
+        $encodedFileName = pathinfo($filePath, PATHINFO_FILENAME);
 
         if (empty($encodedFileName)) {
-            $this->printLine("\tignoring $file -- It has no title.\n");
-            return false;
+            $this->printLine($this->formatter->formatLine("ignoring $filePath -- It has no title", self::SKIPPED));
+            return;
         }
 
         $decodedFileName = urldecode($encodedFileName);
@@ -179,137 +197,114 @@ class WikiImport extends Maintenance {
             $pageTitle = Title::newFromText("$nsName:$decodedFileName");
         }
 
-        $newContentString = file_get_contents($file);
+        $newContentString = file_get_contents($filePath);
         $newContentString = trim($newContentString);
 
-        if ($pageTitle->exists()) {
-            $flags = EDIT_UPDATE;
-        } else     {
-            $flags = EDIT_NEW;
-        }
+        $flags = $pageTitle->exists() ? EDIT_UPDATE : EDIT_NEW;
 
         if (self::isPredefinedPage($pageTitle)) {
-            return false;
+            return;
         }
 
         if ($pageTitle->exists() && !$this->hasOption('force')) {
-            $revision = MediaWikiServices::getInstance()->getRevisionStore()->getRevisionByTitle( $pageTitle );
-            if (!is_null($revision) && !$this->isAutoGenerated($revision)) {
-                $oldText = $revision->getContent( SlotRecord::MAIN )->getWikitextForTransclusion();
+            $revision = MediaWikiServices::getInstance()->getRevisionStore()->getRevisionByTitle($pageTitle);
+            if (!is_null($revision) && !self::isAutoGenerated($revision)) {
+                $oldText = $revision->getContent(SlotRecord::MAIN)->getWikitextForTransclusion();
                 if (EditWikiPage::equalIgnoringLineFeeds($newContentString, $oldText)) {
                     $this->printLine($this->formatter->formatLine($pageTitle->getText(), self::ONLY_LF));
-                    return false;
+                    return;
                 }
-                $this->printLine($this->formatter->formatLine( $pageTitle->getText(), self::CONFLICT));
+                $this->printLine($this->formatter->formatLine($pageTitle->getText(), self::CONFLICT));
                 $this->skipDueToConflict[] = $pageTitle;
-                return false;
+                return;
             }
         }
 
-        $success = EditWikiPage::doEditContent( $pageTitle, $newContentString, self::SUBJECT, $flags );
-        if ( $success === EditWikiPage::NOT_UPDATED ) {
-            $this->printLine($this->formatter->formatLine( $pageTitle->getText(), self::SKIPPED));
-            return false;
-        } elseif ( $success === EditWikiPage::ERROR ) {
-            $this->printLine($this->formatter->formatLine( $pageTitle->getText(), self::ERROR), 'error');
-            return false;
-        } else if ( $success === EditWikiPage::UPDATED ) {
-            $this->printLine($this->formatter->formatLine( $pageTitle->getText(), self::UPDATED));
-            return true;
-        } else if ( $success === EditWikiPage::CREATED ) {
-            $this->printLine($this->formatter->formatLine( $pageTitle->getText(), self::CREATED));
-            return true;
+        $success = EditWikiPage::doEditContent($pageTitle, $newContentString, self::SUBJECT, $flags);
+        if ($success === EditWikiPage::NOT_UPDATED) {
+            $this->printLine($this->formatter->formatLine($pageTitle->getText(), self::SKIPPED));
+        } elseif ($success === EditWikiPage::ERROR) {
+            $this->printLine($this->formatter->formatLine($pageTitle->getText(), self::ERROR), 'error');
+        } else if ($success === EditWikiPage::UPDATED) {
+            $this->printLine($this->formatter->formatLine($pageTitle->getText(), self::UPDATED));
+            $this->updatedOrCreated[] = $pageTitle;
+            $this->count++;
+        } else if ($success === EditWikiPage::CREATED) {
+            $this->printLine($this->formatter->formatLine($pageTitle->getText(), self::CREATED));
+            $this->updatedOrCreated[] = $pageTitle;
+            $this->count++;
         }
 
     }
 
-    /**
-     * checks if the wiki contains pages in the passed namespace, that
-     * do not exist in the filesystem
-     * @return void
-     */
-    private function checkMissingPages( $nsID, $nsName ) {
+    private function checkMissingPages(int $nsID, string $nsName): void
+    {
         $namespaceDir = $this->storageDirectory . '/' . $nsName;
-        if (is_dir ( $namespaceDir )) {
-            $allFiles = scandir($namespaceDir);
+        if (!is_dir($namespaceDir)) {
+            return;
+        }
+        $allFiles = scandir($namespaceDir);
+        $allFiles = array_map(fn($file) => ucfirst($file), $allFiles);
+        $allPages = self::getAllPagesByNamespace($nsID);
 
-            $allPages = $this->getAllPages($nsID);
-
-            $missingFiles = array_diff($allPages, $allFiles);
-            foreach ($missingFiles as $file) {
-                $this->printLine("\twiki contains a page for which no file exists: $file\n");
-            }
+        $missingFiles = array_diff($allPages, $allFiles);
+        foreach ($missingFiles as $file) {
+            $this->printLine($this->formatter->formatLine("wiki contains a page for which no file exists: $file", self::SKIPPED));
         }
     }
 
-    /**
-     * @param int $nsID
-     * @return array with all page names in passed namespace
-     */
-    private function getAllPages($nsID) {
-        $pageNames = array ();
-        $services = MediaWikiServices::getInstance();
-        $DbConnection = $services->getConnectionProvider()->getReplicaDatabase();
+    private static function getAllPagesByNamespace(int $nsID): array
+    {
+        $pageNames = array();
+        $DbConnection = wfGetDB(DB_REPLICA);
 
-        $results = $DbConnection->select (
-            array ('page'),
-            array ('page_id', 'page_title', 'page_namespace'),
+        $results = $DbConnection->select(
+            array('page'),
+            array('page_id', 'page_title', 'page_namespace'),
             "page_namespace = $nsID",
             __METHOD__,
-            array () );
+            array());
 
-        if ($results->numRows () > 0) {
-            foreach ( $results as $row ) {
-                if ($nsID === NS_FILE) {
-                    $pageNames [] = urlencode($row->page_title);
-                } else {
-                    $pageNames [] = urlencode($row->page_title) . '.' . self::FILE_EXTENSION;
-                }
+        if ($results->numRows() > 0) {
+            foreach ($results as $row) {
+                $pageNames [] = urlencode($row->page_title) . '.' . self::FILE_EXTENSION;
             }
         }
 
         return $pageNames;
     }
 
-    /**
-     * @return array with all namespaces, the keys id formed by the NS-ID and the values by their names
-     */
-    private function getNamespaces() {
+    private function getAllNamespaces(): array
+    {
         $Namespaces = RequestContext::getMain()->getLanguage()->getNamespaces();
         $Namespaces[0] = 'Main';
         return $Namespaces;
     }
 
-    /**
-     * Get intersection of selected namespaces (from command line parameters) and all wiki namespaces
-     * @return array mapping NS-IDs to namespace names
-     */
-    private function getRelevantNamespaces($selectedNamespaces, $allNamespaces) {
-        if(is_null($selectedNamespaces)) {
-            return $allNamespaces;
-        } else {
-            $unknownNamespaces = array_diff($selectedNamespaces, $allNamespaces);
-            if(!empty($unknownNamespaces)) {
-                $this->printLine("ERROR: Unknown namespaces:\n", "error");
-                foreach ($unknownNamespaces as $namespace) {
-                    $this->printLine("\t$namespace\n");
-                }
-            }
 
-            return array_intersect($allNamespaces, $selectedNamespaces);
+    private function getRelevantNamespaces($selectedNamespaces, $allNamespaces): array
+    {
+        if (is_null($selectedNamespaces)) {
+            return $allNamespaces;
         }
+        $unknownNamespaces = array_diff($selectedNamespaces, $allNamespaces);
+        if (!empty($unknownNamespaces)) {
+            $this->printLine("ERROR: Unknown namespaces:\n", "error");
+            foreach ($unknownNamespaces as $namespace) {
+                $this->printLine("\t$namespace\n");
+            }
+        }
+
+        return array_intersect($allNamespaces, $selectedNamespaces);
     }
 
-    /**
-     * @param $revision
-     * @return bool
-     */
-    private function isAutoGenerated($revision): bool
+    private static function isAutoGenerated($revision): bool
     {
         return ($revision->getComment()->text === 'auto-generated' || $revision->getComment()->text === self::SUBJECT);
     }
 
-    private static function isPredefinedPage(Title $title) {
+    private static function isPredefinedPage(Title $title): bool
+    {
 
         // note: for some reason property namespace is not canonical
         if (defined("SMW_NS_PROPERTY") && $title->getNamespace() === SMW_NS_PROPERTY) {
@@ -321,8 +316,8 @@ class WikiImport extends Maintenance {
         }
 
         $nsText = MediaWikiServices::getInstance()->getNamespaceInfo()->
-        getCanonicalName( $title->getNamespace() );
-        return in_array( "$nsText:{$title->getText()}" , [
+        getCanonicalName($title->getNamespace());
+        return in_array("$nsText:{$title->getText()}", [
             "MediaWiki:Smw import foaf",
             "MediaWiki:Smw import owl",
             "MediaWiki:Smw import skos",
@@ -334,55 +329,60 @@ class WikiImport extends Maintenance {
     private function initFormatter(): void
     {
         $config = new Config([80, 20], [Config::LEFT_ALIGN, Config::LEFT_ALIGN]);
-        $config->highlightWord(self::SKIPPED, Color::fromColor(COLOR::BLACK, Color::LIGHT_GREY), 1);
-        $config->highlightWord(self::UPDATED, Color::fromColor(COLOR::BLACK, Color::GREEN), 1);
-        $config->highlightWord(self::CREATED, Color::fromColor(COLOR::BLACK, Color::GREEN), 1);
-        $config->highlightWord(self::CONFLICT, Color::fromColor(COLOR::BLACK, Color::MAGENTA), 1);
-        $config->highlightWord(self::ERROR, Color::fromColor(COLOR::BLACK, Color::RED), 1);
-        $config->highlightWord(self::ONLY_LF, Color::fromColor(COLOR::BLACK, Color::YELLOW), 1);
-        $config->setLeftColumnPadding(0,3);
+        $config->highlightWord(self::SKIPPED, Color::fromColor(COLOR::BLACK, Color::LIGHT_GREY), 1)
+            ->highlightWord(self::UPDATED, Color::fromColor(COLOR::BLACK, Color::GREEN), 1)
+            ->highlightWord(self::UPLOADED, Color::fromColor(COLOR::BLACK, Color::GREEN), 1)
+            ->highlightWord(self::CREATED, Color::fromColor(COLOR::BLACK, Color::GREEN), 1)
+            ->highlightWord(self::CONFLICT, Color::fromColor(COLOR::BLACK, Color::MAGENTA), 1)
+            ->highlightWord(self::ERROR, Color::fromColor(COLOR::BLACK, Color::RED), 1)
+            ->highlightWord(self::ONLY_LF, Color::fromColor(COLOR::BLACK, Color::YELLOW), 1)
+            ->setLeftColumnPadding(0, 3);
         $this->formatter = new Formatter($config);
     }
 
-    private function printLine($line, $lvl = 'log') {
-        $trimmedLine = trim($this->removeEscapeSeqs($line));
+    private function printLine($line, $lvl = 'log'): void
+    {
+        $trimmedLine = trim(self::removeEscapeSeqs($line));
         if ($trimmedLine !== '') {
             $this->logger->{$lvl}($trimmedLine);
         }
         echo "\n$line";
     }
 
-    private function removeEscapeSeqs($s) {
+    private static function removeEscapeSeqs($s): string
+    {
         return preg_replace('/\033\[[^]]+m/', '', $s);
     }
 
-    private function uploadFile(string $location, string $filename)
+    private function uploadFile(string $location, string $filename): void
     {
 
         $decodedFileName = urldecode($filename);
         $fileTitle = Title::newFromText($decodedFileName, NS_FILE);
         $fileInRepo = $this->fileRepo->newFile($fileTitle);
-        if ($fileTitle->exists()) {
+        $hasOldFile = false;
+        if ($fileTitle->exists() && $fileInRepo->getLocalRefPath() !== false) {
+            $hasOldFile = true;
             $hashOld = md5(file_get_contents($fileInRepo->getLocalRefPath()));
             $fileData = file_get_contents($location);
             $hashNew = md5($fileData);
             if ($hashOld === $hashNew) {
-                $this->printLine("\tignoring $filename -- same content.\n");
-                return false;
+                $this->printLine($this->formatter->formatLine($fileTitle->getText() . " -- same content", self::SKIPPED));
+                return;
             }
         }
         $status = $fileInRepo->upload(new FSFile($location), "auto-generated", "");
         if ($status->isOK()) {
-            $this->printLine("\timported file: $filename");
-            return true;
+            $this->printLine($this->formatter->formatLine("File uploaded '" . $fileTitle->getText() . "'", $hasOldFile ? self::UPDATED : self::UPLOADED));
+            $this->uploadedFiles[] = $filename;
+            $this->count++;
         } else {
-            $this->printLine("\tupload failed due to errors: $filename");
-            $this->printLine(print_r($status->getErrorsArray(), true));
-            return false;
+            $this->printLine($this->formatter->formatLine($fileTitle->getText(), self::ERROR));
+            $this->printLine($this->formatter->formatLine(implode(", ", $status->getErrorsArray()[0]), ''));
         }
     }
 
-} // end of WikiImport class
+}
 
 $maintClass = 'WikiImport';
 require_once RUN_MAINTENANCE_IF_MAIN;
